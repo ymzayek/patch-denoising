@@ -3,7 +3,9 @@ import abc
 import warnings
 import numpy as np
 from tqdm.auto import tqdm
-
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
 from .._docs import fill_doc
 
 from .utils import get_patch_locs
@@ -57,10 +59,38 @@ class BaseSpaceTimeDenoiser(abc.ABC):
             process_mask = np.full(data_shape[:-1], True)
         else:
             process_mask = np.copy(mask)
-
         patch_shape, patch_overlap = self.__get_patch_param(data_shape)
-        patch_size = np.prod(patch_shape)
 
+        patch_size = np.prod(patch_shape)
+        input_data_reshaped = torch.from_numpy(input_data.reshape(input_data.shape[-1], input_data.shape[0], input_data.shape[1], input_data.shape[2]))
+
+        print(input_data_reshaped.shape)
+
+        _, c, h, w = input_data_reshaped.shape
+        kc, kh, kw = patch_shape  # kernel size
+        dc, dh, dw = np.repeat(patch_shape[0] - patch_overlap[0], 3)
+        pc = int(np.ceil(c/kc) * kc - c)
+        ph = int(np.ceil(h/kh) * kh - h)
+        pw = int(np.ceil(w/kw) * kw - w)
+
+        input_data_reshaped = F.pad(input=input_data_reshaped, pad=(0, pw, 0, ph, 0, pc), mode='constant', value=0)
+
+        patches = input_data_reshaped.unfold(1, kc, dc).unfold(2, kh, dh).unfold(3, kw, dw)
+        unfold_shape = patches.size()
+        patches = patches.contiguous().view(patches.size(0), -1, kc, kh, kw)
+        print(patches.shape)
+
+        # Reshape back
+        # patches_orig = patches.view(unfold_shape)
+        # print(patches_orig.shape)
+        # print(unfold_shape)
+        # output_h = unfold_shape[0] * unfold_shape[2]
+        # output_w = unfold_shape[1] * unfold_shape[3]
+        # patches_orig = patches_orig.permute(0, 2, 1, 3).contiguous()
+        # patches_orig = patches_orig.view(output_h, output_w)
+        # print(patches_orig.shape)
+        # exit(0)
+        # exit(0)
         if self.recombination == "center":
             patch_center = (
                 *(slice(ps // 2, ps // 2 + 1) for ps in patch_shape),
@@ -81,21 +111,28 @@ class BaseSpaceTimeDenoiser(abc.ABC):
                 get_it[i] = True
 
         print("Denoise {:.2f}% patches".format(100 * np.sum(get_it) / len(patch_locs)))
+        print(f"Before:{patch_locs.shape}")
         patch_locs = np.ascontiguousarray(patch_locs[get_it])
 
         if progbar is None:
             progbar = tqdm(total=len(patch_locs))
         elif progbar is not False:
             progbar.reset(total=len(patch_locs))
-
+        # print(patch_locs)
+        print(patch_locs.shape)
+        exit(0)
         for patch_tl in patch_locs:
+            print(patch_tl)
+            # exit(0)
             patch_slice = tuple(
                 slice(tl, tl + ps) for tl, ps in zip(patch_tl, patch_shape)
             )
             process_mask[patch_slice] = 1
             # building the casoratti matrix
             patch = np.reshape(input_data[patch_slice], (-1, input_data.shape[-1]))
-
+            print(patch_locs.shape)
+            print(patch.shape)
+            exit(0)
             # Replace all nan by mean value of patch.
             # FIXME this behaviour should be documented
             # And ideally choosen by the user.

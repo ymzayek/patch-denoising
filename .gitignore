@@ -17,3 +17,4 @@ docs/auto_examples/
 docs_build/
 
 src/patch_denoise/_version.py
+wrdcsub-01_ses-00_task-ArchiSocial_dir-ap_bold.nii
