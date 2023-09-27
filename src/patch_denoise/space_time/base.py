@@ -122,9 +122,16 @@ class BaseSpaceTimeDenoiser(abc.ABC):
             elif self.recombination == "weighted":
                 theta = torch.from_numpy(1 / (2 + maxidx))
                 output_data = p_denoise * theta.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)
-                
-                # fold = nn.Fold(output_size=(output_data.shape[0], ), kernel_size=(2, 2))
-                print(output_data.shape)
+                p_c, p_h, p_w = patches.shape[1], patches.shape[2], patches.shape[3]
+                output_data = output_data.reshape([p_c, p_h, p_w, kc, kh, kw, t_s]).permute(6, 0, 1, 2, 3, 4, 5)
+                # output_data = output_data.fold(1, kc, sc)
+                # print(output_data.shape)
+                # print(input_data.shape)
+                # exit(0)
+                # print(output_data.shape)
+                print(torch.fold(output_data, dimension=0, output_size=input_data.shape[1:]))
+                fold = nn.Fold(output_size=input_data.shape[1:], kernel_size=(kc, kh, kw), stride=(sc, sh, sw))
+                tmp = fold(output_data)
                 print(tmp.shape)
                 exit(0)
             elif self.recombination == "average":

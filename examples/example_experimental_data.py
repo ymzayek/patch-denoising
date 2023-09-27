@@ -24,11 +24,11 @@ output_path = "/results"
 
 img = nib.load(input_path)
 patch_shape = (11, 11, 11)
-patch_overlap = (5)
+patch_overlap = (1)
 
 # initialize denoiser
 optimal_llr = OptimalSVDDenoiser(patch_shape, patch_overlap)
 
 # denoise image
-denoised = optimal_llr.denoise(img.get_fdata())
+denoised = optimal_llr.denoise(img.get_fdata(), backend='gpu')
 print(denoised)
