@@ -37,7 +37,7 @@ class BaseSpaceTimeDenoiser(abc.ABC):
         self.input_denoising_kwargs = dict()
 
     @fill_doc
-    def denoise(self, input_data, mask=None, mask_threshold=50, progbar=None):
+    def denoise(self, input_data, mask=None, mask_threshold=50, progbar=None, backend='cpu'):
         """Denoise the input_data, according to mask.
 
         Patches are extracted sequentially and process by the implemented
@@ -79,26 +79,93 @@ class BaseSpaceTimeDenoiser(abc.ABC):
         patch_locs = get_patch_locs(patch_shape, patch_overlap, data_shape[:-1])
         get_it = np.zeros(len(patch_locs), dtype=bool)
 
-        input_data_reshaped = torch.from_numpy(input_data.reshape(input_data.shape[-1], input_data.shape[0], input_data.shape[1], input_data.shape[2]))
+        if backend == 'gpu':
+            output_data = torch.from_numpy(output_data)
 
-        t_s, c, h, w = input_data_reshaped.shape
-        kc, kh, kw = patch_shape  # kernel size
-        sc, sh, sw = np.repeat(patch_shape[0] - patch_overlap[0], 3)
-        needed_c = int((np.ceil((c - kc) / sc + 1) - ((c - kc) / sc + 1)) * kc)
-        needed_h = int((np.ceil((h - kh) / sh + 1) - ((h - kh) / sh + 1)) * kh)
-        needed_w = int((np.ceil((w - kw) / sw + 1) - ((w - kw) / sw + 1)) * kw)
+            permuted_indices = list(np.arange(len(input_data.shape)))[-1:] + list(np.arange(len(input_data.shape)))[:-1]
+            input_data = torch.from_numpy(input_data).permute(permuted_indices)
 
-        input_data_reshaped = F.pad(input=input_data_reshaped, pad=(0, needed_w, 0, needed_h, 0, needed_c), mode='replicate')
-        
-        patches = input_data_reshaped.unfold(1, kc, sc).unfold(2, kh, sh).unfold(3, kw, sw)
+            t_s, c, h, w = input_data.shape
+            kc, kh, kw = patch_shape  # kernel size
+            sc, sh, sw = np.repeat(patch_shape[0] - patch_overlap[0], len(patch_shape))
+            needed_c = int((np.ceil((c - kc) / sc + 1) - ((c - kc) / sc + 1)) * kc)
+            needed_h = int((np.ceil((h - kh) / sh + 1) - ((h - kh) / sh + 1)) * kh)
+            needed_w = int((np.ceil((w - kw) / sw + 1) - ((w - kw) / sw + 1)) * kw)
 
-        # Reshape the tensor
-        patches_reshaped = patches.permute(1, 2, 3, 4, 5, 6, 0)
-        patches_reshaped = patches_reshaped.reshape([patches_reshaped.shape[0]*patches_reshaped.shape[1]*patches_reshaped.shape[2], kc*kh*kw, t_s])
-        print(patches_reshaped.shape)
-        result = print_shape(patches_reshaped)
-        print(result)
-        exit(0)
+            input_data_reshaped = F.pad(input=input_data, pad=(0, needed_w, 0, needed_h, 0, needed_c), mode='replicate')
+            patches = input_data_reshaped.unfold(1, kc, sc).unfold(2, kh, sh).unfold(3, kw, sw)
+
+            # Reshape the tensor
+            permuted_indices = list(np.arange(len(patches.shape)))[1:] + list(np.arange(len(patches.shape)))[:1]
+            patches_reshaped = patches.permute(permuted_indices)
+
+            patches_reshaped = patches_reshaped.reshape([patches_reshaped.shape[0]*patches_reshaped.shape[1]*patches_reshaped.shape[2], kc*kh*kw, t_s])
+
+            batch_means = torch.nanmean(torch.nanmean(patches_reshaped, dim=1), dim=1)
+
+            # Create a mask for NaN values
+            # nan_mask = torch.isnan(patches_reshaped)
+            # print(nan_mask)
+            # exit(0)
+            # print(batch_means)
+            # print(batch_means.shape)
+            # exit(0)
+
+            p_denoise, maxidx, noise_var = self._patch_processing(
+                patches_reshaped,
+                backend=backend,
+                **self.input_denoising_kwargs,
+            )
+            p_denoise = p_denoise.reshape([p_denoise.shape[0], kc, kh, kw, p_denoise.shape[-1]])
+            if self.recombination == "center":
+                pass
+            elif self.recombination == "weighted":
+                theta = torch.from_numpy(1 / (2 + maxidx))
+                output_data = p_denoise * theta.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)
+                
+                # fold = nn.Fold(output_size=(output_data.shape[0], ), kernel_size=(2, 2))
+                print(output_data.shape)
+                print(tmp.shape)
+                exit(0)
+            elif self.recombination == "average":
+                pass
+            else:
+                raise ValueError("recombination must be one of 'weighted', 'average', 'center'")
+            exit(0)
+        #     patch_center_img = tuple(
+        #         ptl + ps // 2 for ptl, ps in zip(patch_tl, patch_shape)
+        #     )
+        #     if self.recombination == "center":
+        #         output_data[patch_center_img] = p_denoise[patch_center]
+        #         noise_std_estimate[patch_center_img] += noise_var
+        #     elif self.recombination == "weighted":
+        #         output_data[patch_slice] += p_denoise * theta
+        #         patchs_weight[patch_slice] += theta
+        #     elif self.recombination == "average":
+        #         output_data[patch_slice] += p_denoise
+        #         patchs_weight[patch_slice] += 1
+        #     else:
+        #         raise ValueError(
+        #             "recombination must be one of 'weighted', 'average', 'center'"
+        #         )
+        #     if not np.isnan(noise_var):
+        #         noise_std_estimate[patch_slice] += noise_var
+        #     # the top left corner of the patch is used as id for the patch.
+        #     rank_map[patch_center_img] = maxidx
+        #     if progbar:
+        #         progbar.update()
+        # # Averaging the overlapping pixels.
+        # # this is only required for averaging recombinations.
+        # if self.recombination in ["average", "weighted"]:
+        #     output_data /= patchs_weight[..., None]
+        #     noise_std_estimate /= patchs_weight
+
+        # output_data[~process_mask] = 0
+
+        # return output_data, patchs_weight, noise_std_estimate, rank_map
+    
+            exit(0)
+
         for i, patch_tl in enumerate(patch_locs):
             patch_slice = tuple(
                 slice(tl, tl + ps) for tl, ps in zip(patch_tl, patch_shape)
@@ -113,21 +180,15 @@ class BaseSpaceTimeDenoiser(abc.ABC):
             progbar = tqdm(total=len(patch_locs))
         elif progbar is not False:
             progbar.reset(total=len(patch_locs))
-        # print(patch_locs)
-        print(patch_locs.shape)
-        exit(0)
+
         for patch_tl in patch_locs:
-            print(patch_tl)
-            # exit(0)
             patch_slice = tuple(
                 slice(tl, tl + ps) for tl, ps in zip(patch_tl, patch_shape)
             )
             process_mask[patch_slice] = 1
             # building the casoratti matrix
             patch = np.reshape(input_data[patch_slice], (-1, input_data.shape[-1]))
-            print(patch_locs.shape)
-            print(patch.shape)
-            exit(0)
+
             # Replace all nan by mean value of patch.
             # FIXME this behaviour should be documented
             # And ideally choosen by the user.
@@ -136,6 +197,7 @@ class BaseSpaceTimeDenoiser(abc.ABC):
             p_denoise, maxidx, noise_var = self._patch_processing(
                 patch,
                 patch_slice=patch_slice,
+                backend=backend,
                 **self.input_denoising_kwargs,
             )
 
@@ -148,6 +210,10 @@ class BaseSpaceTimeDenoiser(abc.ABC):
                 noise_std_estimate[patch_center_img] += noise_var
             elif self.recombination == "weighted":
                 theta = 1 / (2 + maxidx)
+                print(theta)
+                print((p_denoise * theta).shape)
+                # print(p_denoise * theta)
+                exit(0)
                 output_data[patch_slice] += p_denoise * theta
                 patchs_weight[patch_slice] += theta
             elif self.recombination == "average":

@@ -1,7 +1,9 @@
 """Low Rank  methods."""
+import torch
 from types import MappingProxyType
 
 import numpy as np
+import pandas as pd
 from scipy.linalg import svd
 from scipy.optimize import minimize
 
@@ -268,6 +270,9 @@ def _opt_nuc_shrink(singvals, beta=1):
 
 def _opt_fro_shrink(singvals, beta=1):
     """Perform optimal threshold of singular values for frobenius norm."""
+    if torch.is_tensor(singvals):
+        return torch.sqrt(torch.maximum(((singvals**2) - beta - 1) ** 2 - 4 * beta, torch.zeros_like(singvals)) / singvals)
+
     return np.sqrt(
         np.maximum(
             (((singvals**2) - beta - 1) ** 2 - 4 * beta),
@@ -320,6 +325,7 @@ class OptimalSVDDenoiser(BaseSpaceTimeDenoiser):
         noise_std=None,
         eps_marshenko_pastur=1e-7,
         progbar=None,
+        backend='cpu'
     ):
         """
         Optimal thresholing denoising method.
@@ -364,35 +370,73 @@ class OptimalSVDDenoiser(BaseSpaceTimeDenoiser):
         else:
             self.input_denoising_kwargs["var_apriori"] = noise_std**2
 
-        return super().denoise(input_data, mask, mask_threshold, progbar=progbar)
+        return super().denoise(input_data, mask, mask_threshold, progbar=progbar, backend=backend)
 
     def _patch_processing(
         self,
         patch,
         patch_slice=None,
+        backend='gpu',
         shrink_func=None,
         mp_median=None,
         var_apriori=None,
     ):
-        u_vec, s_values, v_vec, p_tmean = svd_analysis(patch)
-        if var_apriori is not None:
-            sigma = np.mean(np.sqrt(var_apriori[patch_slice]))
-        else:
-            sigma = np.median(s_values) / np.sqrt(patch.shape[1] * mp_median)
+        if backend != 'gpu':
+            u_vec, s_values, v_vec, p_tmean = svd_analysis(patch)
+            if var_apriori is not None:
+                sigma = np.mean(np.sqrt(var_apriori[patch_slice]))
+            else:
+                sigma = np.median(s_values) / np.sqrt(patch.shape[1] * mp_median)
 
-        scale_factor = np.sqrt(patch.shape[1]) * sigma
-        thresh_s_values = scale_factor * shrink_func(
-            s_values / scale_factor,
-            beta=patch.shape[1] / patch.shape[0],
-        )
-        thresh_s_values[np.isnan(thresh_s_values)] = 0
+            scale_factor = np.sqrt(patch.shape[1]) * sigma
+            thresh_s_values = scale_factor * shrink_func(
+                s_values / scale_factor,
+                beta=patch.shape[1] / patch.shape[0],
+            )
+            thresh_s_values[np.isnan(thresh_s_values)] = 0
 
-        if np.any(thresh_s_values):
-            maxidx = np.max(np.nonzero(thresh_s_values)) + 1
-            p_new = svd_synthesis(u_vec, thresh_s_values, v_vec, p_tmean, maxidx)
+            if np.any(thresh_s_values):
+                maxidx = np.max(np.nonzero(thresh_s_values)) + 1
+                p_new = svd_synthesis(u_vec, thresh_s_values, v_vec, p_tmean, maxidx)
+            else:
+                maxidx = 0
+                p_new = np.zeros_like(patch) + p_tmean
         else:
-            maxidx = 0
-            p_new = np.zeros_like(patch) + p_tmean
+            # SVD Decomposition
+            batch_means = torch.nanmean(patch, dim=1, keepdim=True)
+            batch_scaled = patch - batch_means
+
+            U, S, V = torch.svd(batch_scaled)
+
+            if var_apriori is not None:
+                # sigma = np.mean(np.sqrt(var_apriori[patch_slice]))
+                pass
+            else:
+                batch_sigma = torch.median(S, dim=1).values / (np.sqrt(patch.shape[-1] * mp_median))
+
+            scale_factor = np.sqrt(patch.shape[2]) * batch_sigma
+            thresh_s_values = scale_factor.unsqueeze(-1) * shrink_func(
+                torch.div(S, scale_factor.unsqueeze(-1)),
+                beta=patch.shape[-1] / patch.shape[-2],
+            )
+
+            thresh_s_values = torch.nan_to_num(thresh_s_values, nan=0)
+
+            check_any = torch.any(thresh_s_values, dim=1)
+
+            indices_true = torch.nonzero(check_any).squeeze()
+            indices_false = torch.nonzero(~check_any).squeeze()
+
+            maxidx = np.zeros(thresh_s_values.shape[0])
+
+            if len(indices_true) > 0:
+                thresh_s_values_t = thresh_s_values[indices_true, :]
+                nonzero_tensor = torch.nonzero(thresh_s_values_t)
+                df_nonzero_tensor = pd.DataFrame(nonzero_tensor.numpy(), columns=['Rows', 'Columns'])
+                maxidx[indices_true] = np.array((df_nonzero_tensor.groupby(by=['Rows']).max()['Columns'] + 1))
+                p_new = U[indices_true, ...] @ (thresh_s_values_t.unsqueeze(-1) * torch.transpose(V[indices_true, ...], 1, 2)) + batch_means[indices_true, :]
+            if len(indices_false) > 0:
+                pass
 
         return p_new, maxidx, np.NaN
 
